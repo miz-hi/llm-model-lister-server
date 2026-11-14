@@ -1,0 +1,5 @@
+# generated at runtime next to the exe
+server/config.json
+server/index_html.cs
+server/crash.txt
+server/*.log

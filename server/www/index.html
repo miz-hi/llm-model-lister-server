@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM モデル一覧</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel2: #1e232d;
+    --border: #2a3140;
+    --text: #e6e9ef;
+    --muted: #8b93a3;
+    --accent: #4da3ff;
+    --ok: #38b26f;
+    --err: #e05c5c;
+    --warn: #d9a13c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    font-size: 14px;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    background: var(--panel);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header h1 { font-size: 17px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
+  h2 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin: 24px 0 10px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button {
+    background: var(--panel2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 14px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: #1c3a5e; border-color: #2b5a8c; }
+  button.danger { color: var(--err); }
+  button.small { padding: 4px 9px; font-size: 12px; }
+  input[type=text], input[type=password] {
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 13px;
+  }
+  input.url { flex: 1 1 320px; min-width: 240px; }
+  input.name { width: 180px; }
+  input.key { width: 160px; }
+  .server-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    background: var(--panel);
+    flex-wrap: wrap;
+  }
+  .card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    margin-bottom: 16px;
+    overflow: hidden;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--panel2);
+    flex-wrap: wrap;
+  }
+  .card-head .title { font-weight: 600; }
+  .badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 99px;
+    border: 1px solid;
+  }
+  .badge.ok { color: var(--ok); border-color: var(--ok); }
+  .badge.err { color: var(--err); border-color: var(--err); }
+  .badge.info { color: var(--muted); border-color: var(--border); }
+  .meta { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 14px; border-top: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.model-id { font-family: Consolas, monospace; }
+  .tag {
+    display: inline-block;
+    font-size: 11px;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-right: 4px;
+    color: var(--muted);
+  }
+  .status-loaded { color: var(--ok); }
+  .status-other { color: var(--warn); }
+  .empty { color: var(--muted); padding: 14px; }
+  #search { width: 260px; }
+  .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  pre {
+    font-family: Consolas, monospace;
+    font-size: 12.5px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  code {
+    font-family: Consolas, monospace;
+    font-size: 13px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    display: inline-block;
+    margin-bottom: 8px;
+    color: var(--accent);
+  }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>LLM モデル一覧</h1>
+  <span class="sub">登録済み OpenAI 互換サーバーの公開モデルを一覧表示</span>
+  <div style="flex:1"></div>
+  <input id="search" type="text" placeholder="モデル ID をフィルタ…">
+  <button class="primary" id="btn-fetch-all">すべて取得</button>
+</header>
+
+<main>
+  <h2>登録サーバー</h2>
+  <div id="servers"></div>
+  <div class="row" style="margin-top:8px">
+    <button id="btn-add">+ サーバーを追加</button>
+    <button id="btn-save">保存</button>
+    <span class="meta" id="save-note"></span>
+  </div>
+
+  <h2>モデル一覧</h2>
+  <div id="results"><div class="empty">「すべて取得」を押すと、登録サーバーのモデルを表示します。</div></div>
+
+  <h2>ゲートウェイ(ルーティングプロキシ)</h2>
+  <div class="card">
+    <div class="card-head">
+      <span class="title">OpenAI 互換エンドポイント</span>
+      <span class="meta">登録サーバーのモデルをこのアドレスへ転送します</span>
+      <span class="meta" id="gw-crawl-info"></span>
+      <div style="flex:1"></div>
+      <button class="small" id="btn-routes">ルート再スキャン</button>
+    </div>
+    <div style="padding:12px 14px">
+      <code id="gw-base"></code>
+      <pre id="gw-usage"></pre>
+    </div>
+    <div id="routes"></div>
+  </div>
+</main>
+
+<script>
+"use strict";
+let servers = [];
+let results = {}; // serverId -> probe 結果
+let filter = "";
+
+const $ = (sel) => document.querySelector(sel);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(pathname, body) {
+  const res = await fetch(pathname, body
+    ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    : undefined);
+  if (!res.ok) throw new Error(pathname + " → HTTP " + res.status);
+  return res.json();
+}
+
+// ---------- 登録サーバーの編集 UI ----------
+function renderServers() {
+  const box = $("#servers");
+  box.innerHTML = "";
+  servers.forEach((s, i) => {
+    const row = document.createElement("div");
+    row.className = "server-row";
+    row.innerHTML =
+      '<input class="name" type="text" placeholder="表示名" data-i="' + i + '" data-f="name" value="' + esc(s.name) + '">' +
+      '<input class="url" type="text" placeholder="http(s)://host:port や …/v1" data-i="' + i + '" data-f="url" value="' + esc(s.url) + '">' +
+      '<input class="key" type="text" placeholder="APIキー(任意)" data-i="' + i + '" data-f="key" value="' + esc(s.key) + '">' +
+      '<input class="key" type="text" placeholder="モデルエイリアス(任意)" data-i="' + i + '" data-f="alias" value="' + esc(s.alias) + '">' +
+      '<button class="small" data-act="probe" data-i="' + i + '">取得</button>' +
+      '<button class="small danger" data-act="del" data-i="' + i + '">削除</button>';
+    box.appendChild(row);
+  });
+  box.querySelectorAll("input").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      servers[+inp.dataset.i][inp.dataset.f] = inp.value;
+      markDirty();
+    });
+  });
+  box.querySelectorAll("button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const i = +btn.dataset.i;
+      if (btn.dataset.act === "del") {
+        servers.splice(i, 1);
+        delete results[servers[i] && servers[i].id];
+        renderServers();
+        saveNow();
+      } else {
+        fetchOne(servers[i], btn);
+      }
+    });
+  });
+}
+
+let dirty = false;
+function markDirty() {
+  dirty = true;
+  $("#save-note").textContent = "未保存の変更があります";
+}
+
+async function saveNow() {
+  await api("/api/servers", { servers });
+  dirty = false;
+  $("#save-note").textContent = "保存しました " + new Date().toLocaleTimeString("ja-JP");
+}
+
+// ---------- 取得 ----------
+async function fetchOne(s, btn) {
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin">◌</span> 取得中'; }
+  try {
+    const r = await api("/api/probe", { url: s.url, key: s.key });
+    results[s.id] = r;
+  } catch (e) {
+    results[s.id] = { ok: false, error: String(e.message || e) };
+  }
+  if (btn) { btn.disabled = false; btn.textContent = "取得"; }
+  renderResults();
+}
+
+async function fetchAll() {
+  $("#btn-fetch-all").disabled = true;
+  $("#btn-fetch-all").textContent = "取得中…";
+  try {
+    const { results: rs } = await api("/api/probe-all", {
+      targets: servers.map((s) => ({ id: s.id, url: s.url, key: s.key })),
+    });
+    rs.forEach((r) => { results[r.id] = r.result; });
+  } catch (e) {
+    console.error(e);
+  }
+  $("#btn-fetch-all").disabled = false;
+  $("#btn-fetch-all").textContent = "すべて取得";
+  renderResults();
+}
+
+// ---------- 結果表示 ----------
+function modelStatus(m) {
+  const st = m && m.status && (m.status.value || m.status);
+  return typeof st === "string" ? st : null;
+}
+function ctxOf(m) {
+  return (m && m.meta && (m.meta.n_ctx || m.meta.context_window || m.meta.max_context)) || null;
+}
+function modalities(m) {
+  const a = m && m.architecture;
+  if (!a) return null;
+  return { in: a.input_modalities || [], out: a.output_modalities || [] };
+}
+
+function renderResults() {
+  const box = $("#results");
+  const f = filter.toLowerCase();
+  const known = servers.filter((s) => results[s.id]);
+  if (!known.length) {
+    box.innerHTML = '<div class="empty">「すべて取得」を押すと、登録サーバーのモデルを表示します。</div>';
+    return;
+  }
+  box.innerHTML = "";
+  known.forEach((s) => {
+    const r = results[s.id];
+    const models = (r.ok && r.models ? r.models : []).filter(
+      (m) => !f || String(m.id || "").toLowerCase().includes(f)
+    );
+    const card = document.createElement("div");
+    card.className = "card";
+
+    let head =
+      '<div class="card-head"><span class="title">' + esc(s.name || s.url) + "</span>" +
+      (r.ok
+        ? '<span class="badge ok">接続 OK</span><span class="badge info">' + r.models.length + " モデル</span>" +
+          '<span class="meta">' + esc(r.endpoint) + " ・ " + r.latencyMs + "ms</span>"
+        : '<span class="badge err">接続失敗</span><span class="meta">' + esc(r.error || "") +
+          (r.endpoint ? " ・ " + esc(r.endpoint) : "") + "</span>") +
+      "</div>";
+
+    if (!r.ok) {
+      card.innerHTML = head;
+      box.appendChild(card);
+      return;
+    }
+    if (!models.length) {
+      card.innerHTML = head + '<div class="empty">' + (f ? "フィルタに一致するモデルがありません" : "モデルは返されませんでした") + "</div>";
+      box.appendChild(card);
+      return;
+    }
+
+    let rows = "";
+    models.forEach((m) => {
+      const st = modelStatus(m);
+      const ctx = ctxOf(m);
+      const mo = modalities(m);
+      rows += "<tr><td class=\"model-id\">" + esc(m.id) + "</td>" +
+        "<td>" + (st ? '<span class="' + (st === "loaded" ? "status-loaded" : "status-other") + '">' + esc(st) + "</span>" : '<span class="meta">-</span>') + "</td>" +
+        "<td>" + (ctx ? Number(ctx).toLocaleString("ja-JP") : '<span class="meta">-</span>') + "</td>" +
+        "<td>" + (mo
+          ? mo.in.map((x) => '<span class="tag">in:' + esc(x) + "</span>").join("") +
+            mo.out.map((x) => '<span class="tag">out:' + esc(x) + "</span>").join("")
+          : '<span class="meta">-</span>') + "</td></tr>";
+    });
+    card.innerHTML = head +
+      "<table><thead><tr><th>モデル ID</th><th>状態</th><th>コンテキスト</th><th>モダリティ</th></tr></thead><tbody>" +
+      rows + "</tbody></table>";
+    box.appendChild(card);
+  });
+}
+
+// ---------- 初期化 ----------
+$("#btn-add").addEventListener("click", () => {
+  servers.push({ id: "s" + Date.now(), name: "新しいサーバー", url: "http://localhost:1234/v1", key: "" });
+  renderServers();
+  markDirty();
+});
+$("#btn-save").addEventListener("click", () => saveNow().catch((e) => alert("保存に失敗: " + e.message)));
+$("#btn-fetch-all").addEventListener("click", fetchAll);
+$("#search").addEventListener("input", (e) => { filter = e.target.value; renderResults(); });
+
+// ---------- ゲートウェイルート表示 ----------
+async function loadRoutes(force) {
+  const box = $("#routes");
+  box.innerHTML = '<div class="empty">スキャン中…</div>';
+  try {
+    const data = await api("/api/routes" + (force ? "?refresh=1" : ""));
+    if (!data.routes.length) {
+      box.innerHTML = '<div class="empty">ルーティングできるモデルがありません。サーバーを登録して取得してください。</div>';
+      return;
+    }
+    let rows = "";
+    const aliasOf = {}; // model|serverId -> alias
+    (data.aliases || []).forEach((a) => { aliasOf[a.model + "|" + a.server] = a.alias; });
+    data.routes.forEach((r) => {
+      rows += '<tr><td class="model-id">' + esc(r.model) + "</td><td>" +
+        r.servers.map((s) => '<span class="tag">' + esc(s.name) + " (" + esc(s.id) + ")</span>").join("") +
+        "</td><td>" +
+        r.servers.map((s) => aliasOf[r.model + "|" + s.id] ? '<span class="tag">alias: ' + esc(aliasOf[r.model + "|" + s.id]) + "</span>" : "").join("") +
+        (r.servers.length > 1
+          ? '<span class="meta">曖昧な場合: </span>' + r.servers.map((s) => '<span class="tag">' + esc(s.id + "/" + r.model) + "</span>").join("")
+          : '<span class="meta">そのまま使用可</span>') +
+        "</td></tr>";
+    });
+    let extra = "";
+    const orphans = (data.aliases || []).filter((a) => !a.model);
+    if (orphans.length) {
+      extra = '<div class="empty">エイリアス未紐付け(サーバーがモデルを返せません): ' + orphans.map((a) => '<span class="tag">' + esc(a.alias) + " → " + esc(a.serverName) + "</span>").join("") + "</div>";
+    }
+    box.innerHTML = "<table><thead><tr><th>モデル ID</th><th>提供サーバー</th><th>指定方法</th></tr></thead><tbody>" + rows + "</tbody></table>" + extra;
+    if (data.generatedAt) {
+      const info = "最終クロール: " + new Date(data.generatedAt).toLocaleString("ja-JP") +
+        (data.intervalSec ? " ・ " + data.intervalSec + " 秒間隔で自動クロール中" : " ・ 自動クロール無効");
+      $("#btn-routes").title = info;
+      $("#gw-crawl-info").textContent = info;
+    }
+    const firstAlias = (data.aliases || []).map((a) => a.alias).filter(Boolean)[0];
+    if (firstAlias) window.__firstAlias = firstAlias;
+    renderGatewayUsage();
+  } catch (e) {
+    box.innerHTML = '<div class="empty">取得失敗: ' + esc(e.message) + "</div>";
+  }
+}
+
+function renderGatewayUsage() {
+  const base = location.origin + "/v1";
+  $("#gw-base").textContent = base;
+  const model = window.__firstAlias || window.__firstModel || "モデルID";
+  $("#gw-usage").textContent =
+    "curl " + base + "/chat/completions \\\n" +
+    '  -H "Content-Type: application/json" \\\n' +
+    '  -d \'{"model": "' + model + '", "messages": [{"role":"user","content":"こんにちは"}]}\'\n\n' +
+    "OpenAI SDK なら:\n" +
+    '  client = OpenAI(base_url="' + base + '", api_key="dummy")';
+}
+
+$("#btn-routes").addEventListener("click", () => loadRoutes(true));
+
+(async function init() {
+  const data = await api("/api/servers");
+  servers = data.servers || [];
+  servers.forEach((s, i) => { if (!s.id) s.id = "s" + i; });
+  renderServers();
+  await fetchAll(); // 起動時に自動で取得
+  const first = Object.values(results).map((r) => r.models && r.models[0]).filter(Boolean)[0];
+  if (first) window.__firstModel = first.id;
+  renderGatewayUsage();
+  loadRoutes(false);
+})();
+</script>
+</body>
+</html>
