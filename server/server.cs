@@ -232,6 +232,13 @@ namespace ModelListerServer
         private Dictionary<string, string> _aliasReal; // alias -> bound modelId (for change detection)
         private DateTime _routesUtc = DateTime.MinValue;
         private Thread _crawler;
+        private volatile bool _refreshing; // at most one background refresh at a time
+
+        // per-server circuit breaker: a server that fails is skipped until its cooldown ends
+        // (only that server's models/aliases go away; the rest keeps answering at full speed)
+        private readonly Dictionary<string, DateTime> _skipUntil = new Dictionary<string, DateTime>(); // serverId -> next probe
+        private readonly Dictionary<string, int> _failStreak = new Dictionary<string, int>();
+        private readonly object _refreshGate = new object(); // serialize table rebuilds
 
         private readonly object _logLock = new object();
         private readonly List<string> _log = new List<string>(); // in-memory only; nothing is written to disk
@@ -272,7 +279,7 @@ namespace ModelListerServer
             while (true)
             {
                 Thread.Sleep(_cfg.CrawlIntervalSec * 1000);
-                try { EnsureRoutes(true); }
+                try { RefreshRoutes(); }
                 catch (Exception e) { Log("crawl error: " + e.Message); }
             }
         }
@@ -382,7 +389,8 @@ namespace ModelListerServer
                     }
                     case "GET /api/routes":
                     {
-                        EnsureRoutes(req.Query("refresh") == "1");
+                        if (req.Query("refresh") == "1") RefreshRoutes();
+                        else EnsureRoutesForRequest();
                         var list = new List<object>();
                         var aliasList = new List<object>();
                         lock (_routeLock)
@@ -404,6 +412,27 @@ namespace ModelListerServer
                                         { "serverName", kv.Value.Srv.Name },
                                     });
                         }
+                        var health = new List<object>();
+                        lock (_routeLock)
+                        {
+                            DateTime nw = DateTime.UtcNow;
+                            List<Srv> snap;
+                            lock (_cfg) snap = new List<Srv>(_cfg.Servers);
+                            foreach (var s in snap)
+                            {
+                                DateTime until; int streak;
+                                _skipUntil.TryGetValue(s.Id, out until);
+                                _failStreak.TryGetValue(s.Id, out streak);
+                                bool down = until > nw;
+                                var h = new Dictionary<string, object> { { "id", s.Id }, { "name", s.Name }, { "down", down } };
+                                if (down)
+                                {
+                                    h["retryInSec"] = (int)(until - nw).TotalSeconds;
+                                    h["fails"] = streak;
+                                }
+                                health.Add(h);
+                            }
+                        }
                         list.Sort(delegate(object a, object b)
                         {
                             return string.Compare(((Dictionary<string, object>)a)["model"] as string, ((Dictionary<string, object>)b)["model"] as string, StringComparison.Ordinal);
@@ -416,12 +445,13 @@ namespace ModelListerServer
                             { "intervalSec", _cfg.CrawlIntervalSec },
                             { "routes", list },
                             { "aliases", aliasList },
+                            { "servers", health },
                         }));
                         return;
                     }
                     case "GET /v1/models":
                     {
-                        EnsureRoutes(true);
+                        EnsureRoutesForRequest();
                         var data = new List<object>();
                         lock (_routeLock)
                         {
@@ -505,7 +535,12 @@ namespace ModelListerServer
                 _cfg.Servers.AddRange(next);
                 _cfg.Save(_baseDir);
             }
-            lock (_routeLock) _routesUtc = DateTime.MinValue; // routes are stale now
+            lock (_routeLock)
+            {
+                _routesUtc = DateTime.MinValue; // routes are stale now
+                _skipUntil.Clear();             // a just-edited server must be probed right away
+                _failStreak.Clear();
+            }
             Log("servers updated (" + next.Count + " entries)");
             SendServers(stream);
         }
@@ -593,23 +628,77 @@ namespace ModelListerServer
             };
         }
 
-        // ---------- routing table (30s cache) ----------
+        // ---------- routing table: parallel crawl + per-server cooldown ----------
 
-        private void EnsureRoutes(bool force)
+        private sealed class ProbeJob
         {
-            lock (_routeLock)
+            public Srv Srv;
+            public Dictionary<string, object> Result;
+        }
+
+        // Rebuild the routing table now. All servers are probed in parallel (one dead server
+        // costs at most its own timeout, not the sum), and servers that failed recently are
+        // skipped while their cooldown runs.
+        private void RefreshRoutes()
+        {
+            lock (_refreshGate)
             {
-                if (!force && _routes != null && (DateTime.UtcNow - _routesUtc).TotalSeconds < 30) return;
-                var routes = new Dictionary<string, List<RouteTarget>>();
-                var perServer = new Dictionary<string, List<string>>(); // serverId -> modelIds seen (order kept)
+                var now = DateTime.UtcNow;
                 List<Srv> snapshot;
                 lock (_cfg) snapshot = new List<Srv>(_cfg.Servers);
+
+                var jobs = new List<ProbeJob>();
+                var threads = new List<Thread>();
                 foreach (var s in snapshot)
                 {
-                    var r = Probe(s.Url, s.Key);
-                    object ok;
-                    if (!r.TryGetValue("ok", out ok) || !(bool)ok) continue;
-                    var models = r["models"] as List<object>;
+                    DateTime until;
+                    lock (_routeLock) _skipUntil.TryGetValue(s.Id, out until);
+                    if (until > now) continue; // temporarily disabled, skip this round
+                    var job = new ProbeJob { Srv = s };
+                    jobs.Add(job);
+                    var jj = job;
+                    var t = new Thread(delegate() { jj.Result = Probe(jj.Srv.Url, jj.Srv.Key); });
+                    t.IsBackground = true;
+                    t.Start();
+                    threads.Add(t);
+                }
+                foreach (var t in threads) t.Join();
+
+                var routes = new Dictionary<string, List<RouteTarget>>();
+                var perServer = new Dictionary<string, List<string>>(); // serverId -> modelIds seen (order kept)
+                foreach (var job in jobs)
+                {
+                    var s = job.Srv;
+                    object okv;
+                    bool good = job.Result != null && job.Result.TryGetValue("ok", out okv) && okv is bool && (bool)okv;
+                    object errv = null;
+                    if (!good && job.Result != null) job.Result.TryGetValue("error", out errv);
+                    if (!good)
+                    {
+                        string msg = errv == null ? "probe failed" : errv.ToString();
+                        // back off 15s,30,60,120,... capped at 10min until it answers again
+                        int streak;
+                        lock (_routeLock) { _failStreak.TryGetValue(s.Id, out streak); }
+                        streak++;
+                        int waitSec = Math.Min(600, 15 * (1 << Math.Min(streak - 1, 5)));
+                        lock (_routeLock)
+                        {
+                            _failStreak[s.Id] = streak;
+                            _skipUntil[s.Id] = DateTime.UtcNow.AddSeconds(waitSec);
+                        }
+                        Log("server down: " + s.Name + " (" + msg + ") - disabled for " + waitSec + "s");
+                        continue;
+                    }
+                    lock (_routeLock)
+                    {
+                        if (_failStreak.ContainsKey(s.Id))
+                        {
+                            _failStreak.Remove(s.Id);
+                            _skipUntil.Remove(s.Id);
+                            Log("server recovered: " + s.Name);
+                        }
+                    }
+                    var models = job.Result["models"] as List<object>;
                     if (models == null) continue;
                     var ids = new List<string>();
                     foreach (var m in models)
@@ -649,26 +738,52 @@ namespace ModelListerServer
                     aliasReal[s.Alias] = bound;
                 }
 
-                // log provider-side changes since last crawl (silent when nothing changed)
-                if (_routes != null)
+                lock (_routeLock)
                 {
-                    foreach (string id in routes.Keys)
-                        if (!_routes.ContainsKey(id)) Log("model appeared: " + id);
-                    foreach (string id in _routes.Keys)
-                        if (!routes.ContainsKey(id)) Log("model removed: " + id);
-                    foreach (var kv in aliasReal)
+                    // log provider-side changes since last crawl (silent when nothing changed)
+                    if (_routes != null)
                     {
-                        string prev;
-                        if (_aliasReal != null && _aliasReal.TryGetValue(kv.Key, out prev) && prev != kv.Value)
-                            Log("alias \"" + kv.Key + "\" rebound: " + prev + " -> " + kv.Value);
+                        foreach (string id in routes.Keys)
+                            if (!_routes.ContainsKey(id)) Log("model appeared: " + id);
+                        foreach (string id in _routes.Keys)
+                            if (!routes.ContainsKey(id)) Log("model removed: " + id);
+                        foreach (var kv in aliasReal)
+                        {
+                            string prev;
+                            if (_aliasReal != null && _aliasReal.TryGetValue(kv.Key, out prev) && prev != kv.Value)
+                                Log("alias \"" + kv.Key + "\" rebound: " + prev + " -> " + kv.Value);
+                        }
                     }
-                }
 
-                _routes = routes;
-                _aliasTargets = aliasTargets;
-                _aliasReal = aliasReal;
-                _routesUtc = DateTime.UtcNow;
+                    _routes = routes;
+                    _aliasTargets = aliasTargets;
+                    _aliasReal = aliasReal;
+                    _routesUtc = DateTime.UtcNow;
+                }
             }
+        }
+
+        // Answer requests from the cached table. A stale table triggers a background refresh
+        // (only one at a time) instead of blocking the request; the very first caller waits.
+        private void EnsureRoutesForRequest()
+        {
+            bool stale;
+            lock (_routeLock)
+                stale = _routes == null || (DateTime.UtcNow - _routesUtc).TotalSeconds >= 30;
+            if (!stale) return;
+            bool first;
+            lock (_routeLock) first = _routes == null;
+            if (first) { RefreshRoutes(); return; }
+            if (_refreshing) return;
+            _refreshing = true;
+            var t = new Thread(delegate()
+            {
+                try { RefreshRoutes(); }
+                catch (Exception e) { Log("refresh error: " + e.Message); }
+                finally { _refreshing = false; }
+            });
+            t.IsBackground = true;
+            t.Start();
         }
 
         private static Dictionary<string, object> ModelEntry(string id, List<RouteTarget> targets, object meta, string aliasOf)
@@ -742,7 +857,7 @@ namespace ModelListerServer
                 return;
             }
 
-            EnsureRoutes(false);
+            EnsureRoutesForRequest();
             string modelId;
             List<string> ambiguous;
             RouteTarget t = Resolve(model, out modelId, out ambiguous);

@@ -393,8 +393,11 @@ async function loadRoutes(force) {
     }
     box.innerHTML = "<table><thead><tr><th>モデル ID</th><th>提供サーバー</th><th>指定方法</th></tr></thead><tbody>" + rows + "</tbody></table>" + extra;
     if (data.generatedAt) {
-      const info = "最終クロール: " + new Date(data.generatedAt).toLocaleString("ja-JP") +
+      let info = "最終クロール: " + new Date(data.generatedAt).toLocaleString("ja-JP") +
         (data.intervalSec ? " ・ " + data.intervalSec + " 秒間隔で自動クロール中" : " ・ 自動クロール無効");
+      const down = (data.servers || []).filter((s) => s.down);
+      if (down.length)
+        info += " ・ 一時無効(自動リトライ待機中): " + down.map((s) => s.name + " " + s.retryInSec + "秒後").join(", ");
       $("#btn-routes").title = info;
       $("#gw-crawl-info").textContent = info;
     }
